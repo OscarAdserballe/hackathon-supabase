@@ -17,17 +17,12 @@ from pydantic import BaseModel, Field # Import Field for potential future use if
 from langchain_anthropic import ChatAnthropic
 
 from langgraph.graph import StateGraph, START, END
+from supabase_utils import initialize_supabase, save_to_supabase_node
 
 load_dotenv()
 github_token = os.getenv("GITHUB_TOKEN")
 google_api_key = os.getenv("GOOGLE_API_KEY")
 anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
-
-model = ChatAnthropic(model='claude-3-7-sonnet-20250219')
-if not github_token:
-    print("Warning: GITHUB_TOKEN environment variable not set. GitHub API calls might fail or be rate-limited.")
-if not google_api_key:
-    raise ValueError("GOOGLE_API_KEY environment variable is required for both CV parsing and analysis.")
 
 class Candidate(BaseModel):
     first_name: str
@@ -134,8 +129,7 @@ class GraphState(TypedDict):
     repositories: Optional[List[Dict[str, Any]]]
     analysis_result: Optional[str]
     error: Optional[str]
-
-# --- LangGraph Nodes ---
+    supabase_save_status: Optional[str] 
 
 def get_github_username_node(state: GraphState) -> Dict[str, Any]:
     """Extracts GitHub username from the candidate's github_url."""
@@ -287,6 +281,7 @@ workflow = StateGraph(GraphState)
 workflow.add_node("get_username", get_github_username_node)
 workflow.add_node("fetch_repos", fetch_github_repos_node)
 workflow.add_node("analyze", analyze_candidate_node)
+workflow.add_node("save_to_db", save_to_supabase_node)
 
 # Set entry point
 workflow.set_entry_point("get_username")
@@ -306,7 +301,9 @@ workflow.add_conditional_edges(
 workflow.add_edge("fetch_repos", "analyze")
 
 # Final node
-workflow.add_edge("analyze", END)
+workflow.add_edge("analyze", "save_to_db")
+
+workflow.add_edge("save_to_db", END)
 
 # Compile the graph
 app = workflow.compile()
@@ -325,24 +322,23 @@ except Exception as e:
 
 
 # --- Main Execution Logic ---
+
 if __name__ == "__main__":
-    # --- Get Initial Candidate Data ---
-    # This happens BEFORE the graph starts execution
-    path_to_cv = "example_cv.pdf" # Make sure this file exists!
+    path_to_cv = "example_cv.pdf"
     print(f"--- Starting CV Enrichment Process for: {path_to_cv} ---")
     try:
+        # (Keep your CV parsing logic)
+        # Optional: Add dummy PDF creation here if needed
         initial_candidate_obj = parse_cv_to_candidate(path_to_cv)
         print(f"\nInitial Candidate Info Parsed:")
-        # Pretty print Pydantic model
         print(initial_candidate_obj.model_dump_json(indent=2))
-
+    except FileNotFoundError as e:
+        print(f"Error: CV file '{path_to_cv}' not found.")
+        exit()
     except Exception as e:
         print(f"Critical Error during CV parsing: {e}")
-        # Consider how to handle this - maybe exit, maybe try default candidate?
-        exit() # Exit for now
+        exit()
 
-
-    # --- Run the LangGraph ---
     print("\n--- Running LangGraph Workflow ---")
     initial_state = {"candidate_obj": initial_candidate_obj}
     try:
@@ -350,17 +346,29 @@ if __name__ == "__main__":
 
         print("\n--- LangGraph Execution Complete ---")
         print("\nFinal State Summary:")
-        candidate_name = f"{final_state.get('candidate_obj').first_name} {final_state.get('candidate_obj').last_name}" if final_state.get('candidate_obj') else 'N/A'
+
+        # (Keep safe access logic for final state)
+        final_candidate = final_state.get('candidate_obj')
+        candidate_name = 'N/A'
+        if final_candidate:
+            candidate_name = f"{getattr(final_candidate, 'first_name', 'N/A')} {getattr(final_candidate, 'last_name', '')}"
+
         print(f"Candidate: {candidate_name}")
         print(f"GitHub Username Parsed: {final_state.get('github_username')}")
-        repo_count = len(final_state.get('repositories')) if final_state.get('repositories') is not None else 'N/A'
+        final_repos = final_state.get('repositories')
+        repo_count = len(final_repos) if final_repos is not None else 'N/A'
         print(f"Repositories Found: {repo_count}")
-        print(f"Process Error: {final_state.get('error')}") # Displays GitHub fetch errors etc.
-        print("\n--- Enrichment Analysis ---")
+        print(f"Process Error: {final_state.get('error')}")
+        print("\n--- Enrichment Analysis (github_text) ---")
         print(final_state.get('analysis_result', "No analysis generated or analysis failed."))
-        print("------------------------")
+
+        # === ADD THIS PRINT STATEMENT ===
+        print("\n--- Supabase Save Status ---")
+        print(f"{final_state.get('supabase_save_status', 'Save status not recorded.')}")
+        # ================================
+        print("-----------------------------") # Adjusted separator
 
     except Exception as graph_e:
         print(f"\n--- Error during LangGraph execution ---")
         print(f"An unexpected error occurred in the graph: {graph_e}")
-        # You might want to log the state at the time of error if possible
+
